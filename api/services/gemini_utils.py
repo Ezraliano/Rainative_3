@@ -3,6 +3,7 @@ import logging
 from typing import Dict, List
 import google.generativeai as genai
 from models.schemas import ContentRecommendation
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -15,158 +16,110 @@ class GeminiService:
             genai.configure(api_key=self.api_key)
             self.model = genai.GenerativeModel('gemini-pro')
         else:
-            logger.warning("GEMINI_API_KEY not found. Using mock responses.")
+            logger.error("GEMINI_API_KEY not found. GeminiService cannot function.")
             self.model = None
 
     async def _generate_content(self, prompt: str) -> str:
-        """Generate content using Gemini API or return mock data."""
-        if self.model and self.api_key:
-            try:
-                response = self.model.generate_content(prompt)
-                return response.text
-            except Exception as e:
-                logger.error(f"Gemini API error: {str(e)}")
-                return self._get_mock_response(prompt)
-        else:
-            return self._get_mock_response(prompt)
-    
-    def _get_mock_response(self, prompt: str) -> str:
-        """Return mock responses based on prompt type."""
-        if "summarize" in prompt.lower():
-            return "This content provides valuable insights into the topic, covering key concepts and practical applications that would be useful for the target audience."
-        elif "viral" in prompt.lower():
-            return "This content has strong viral potential due to its engaging presentation, timely topic, and clear value proposition for viewers."
-        elif "content idea" in prompt.lower():
-            return "Create engaging tutorial content that provides step-by-step guidance while maintaining viewer interest through clear explanations and practical examples."
-        else:
-            return "AI-generated response based on the provided content analysis."
+        """Generate content using Gemini API."""
+        if not self.model:
+            raise Exception("Gemini model is not initialized. Check API key.")
+        
+        try:
+            response = self.model.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            logger.error(f"Gemini API error: {str(e)}")
+            raise Exception(f"Failed to generate content from Gemini: {str(e)}")
 
-# Initialize service instance
+
 gemini_service = GeminiService()
 
 async def summarize_transcript(transcript_chunk: str) -> str:
     """
     Summarize a transcript chunk using Gemini AI.
-    
-    Args:
-        transcript_chunk: Text chunk to summarize
-        
-    Returns:
-        Summary string
     """
-    try:
-        prompt = f"""
-        Please provide a concise summary of the following content in 2-3 sentences, 
-        focusing on the key points and main insights:
-        
-        {transcript_chunk}
-        
-        Summary:
-        """
-        
-        summary = await gemini_service._generate_content(prompt)
-        return summary.strip()
-        
-    except Exception as e:
-        logger.error(f"Error summarizing transcript: {str(e)}")
-        return "Unable to generate summary at this time."
+    prompt = f"""
+    Please provide a concise summary of the following content in 2-3 sentences, 
+    focusing on the key points and main insights:
+    
+    "{transcript_chunk}"
+    
+    Summary:
+    """
+    summary = await gemini_service._generate_content(prompt)
+    return summary.strip()
 
 async def explain_why_viral(title: str, views: int, likes: int, summary: str) -> str:
     """
     Generate explanation for why content has viral potential.
-    
-    Args:
-        title: Content title
-        views: View count
-        likes: Like count  
-        summary: Content summary
-        
-    Returns:
-        Explanation string
     """
-    try:
-        prompt = f"""
-        Analyze why this content has viral potential based on the following information:
-        
-        Title: {title}
-        Views: {views:,} 
-        Likes: {likes:,}
-        Summary: {summary}
-        
-        Provide a detailed explanation (3-4 sentences) covering:
-        1. What makes this content engaging
-        2. Why it resonates with audiences
-        3. Key viral factors (timing, topic, presentation style)
-        
-        Explanation:
-        """
-        
-        explanation = await gemini_service._generate_content(prompt)
-        return explanation.strip()
-        
-    except Exception as e:
-        logger.error(f"Error generating viral explanation: {str(e)}")
-        return "This content demonstrates strong viral potential through its engaging presentation and valuable insights that resonate with the target audience."
+    prompt = f"""
+    Analyze why this content has viral potential based on the following information:
+    
+    Title: {title}
+    Summary: {summary}
+    
+    Provide a detailed explanation (3-4 sentences) covering:
+    1. What makes this content engaging
+    2. Why it resonates with audiences
+    3. Key viral factors (e.g., topic, presentation style, value)
+    
+    Explanation:
+    """
+    explanation = await gemini_service._generate_content(prompt)
+    return explanation.strip()
 
 async def generate_content_idea(category: str, summary: str, reason: str) -> ContentRecommendation:
     """
-    Generate content recommendation based on analysis.
+    Generate content recommendation based on analysis by requesting a JSON object.
+    """
+    prompt = f"""
+    Based on this successful content analysis, generate a new content idea:
     
-    Args:
-        category: Content category
-        summary: Original content summary
-        reason: Why original content is viral
-        
-    Returns:
-        ContentRecommendation object
+    Category: {category}
+    Original Summary: {summary}
+    Viral Factors: {reason}
+    
+    Please provide a response in a valid JSON format only. The JSON object should have the following keys:
+    - "title": A compelling title for the new content (string).
+    - "target_audience": A description of the target audience (string).
+    - "content_style": The recommended content style (string).
+    - "suggested_structure": An object with keys "hook", "introduction", "main_content", and "call_to_action" (object of strings).
+    - "pro_tips": A list of 4-5 pro tips for maximum engagement (list of strings).
+    - "estimated_viral_score": An estimated viral score between 0 and 100 (integer).
+
+    Example JSON structure:
+    {{
+        "title": "Example Title",
+        "target_audience": "Example Audience",
+        "content_style": "Example Style",
+        "suggested_structure": {{
+            "hook": "Example Hook",
+            "introduction": "Example Introduction",
+            "main_content": "Example Main Content",
+            "call_to_action": "Example CTA"
+        }},
+        "pro_tips": ["Tip 1", "Tip 2", "Tip 3", "Tip 4"],
+        "estimated_viral_score": 85
+    }}
+
+    JSON response:
     """
     try:
-        prompt = f"""
-        Based on this successful content analysis, generate a new content idea:
+        response_text = await gemini_service._generate_content(prompt)
+        # Membersihkan response untuk memastikan hanya JSON yang tersisa
+        clean_json_text = response_text.strip().replace('```json', '').replace('```', '').strip()
         
-        Category: {category}
-        Original Summary: {summary}
-        Viral Factors: {reason}
+        # Parsing teks JSON menjadi dictionary Python
+        data = json.loads(clean_json_text)
         
-        Please provide:
-        1. A compelling title for new content
-        2. Target audience description
-        3. Content style recommendation
-        4. Structure breakdown (hook, introduction, main content, call to action)
-        5. 4-5 pro tips for maximum engagement
-        6. Estimated viral score (0-100)
-        
-        Format your response as structured data.
-        """
-        
-        # For now, return structured mock data
-        # TODO: Parse Gemini response into structured format
-        
-        recommendation = ContentRecommendation(
-            title="Master This Trending Skill in 10 Minutes - Complete Beginner's Guide",
-            target_audience="Young professionals, students, and career changers aged 22-35 looking to upskill quickly",
-            content_style="Fast-paced tutorial with screen recording, energetic music, and quick visual transitions",
-            suggested_structure={
-                "hook": "Show the end result first - what viewers will achieve in 10 minutes",
-                "introduction": "Brief explanation of why this skill is trending and valuable",
-                "main_content": "Step-by-step tutorial broken into digestible 2-minute segments",
-                "call_to_action": "Challenge viewers to try it and share their results in comments"
-            },
-            pro_tips=[
-                "Use trending hashtags related to skill development and career growth",
-                "Post during peak engagement hours (7-9 PM in target timezone)",
-                "Create eye-catching thumbnail with before/after comparison",
-                "Respond to comments within the first 2 hours to boost engagement",
-                "Include downloadable resources or templates in description"
-            ],
-            estimated_viral_score=88
-        )
-        
+        # Membuat objek ContentRecommendation dari dictionary
+        recommendation = ContentRecommendation(**data)
         return recommendation
         
     except Exception as e:
-        logger.error(f"Error generating content idea: {str(e)}")
-        # Return fallback recommendation
+        logger.error(f"Error generating or parsing content idea: {str(e)}")
+        # Fallback jika terjadi error
         return ContentRecommendation(
             title="Create Engaging Content That Gets Results",
             target_audience="Content creators and marketers",
@@ -181,7 +134,6 @@ async def generate_content_idea(category: str, summary: str, reason: str) -> Con
                 "Focus on providing genuine value to your audience",
                 "Use clear, concise language that's easy to understand",
                 "Include visual elements to maintain interest",
-                "Optimize for your platform's algorithm"
             ],
             estimated_viral_score=75
         )
@@ -189,34 +141,13 @@ async def generate_content_idea(category: str, summary: str, reason: str) -> Con
 async def summarize_document(file_path: str) -> str:
     """
     Summarize document content.
-    
-    Args:
-        file_path: Path to document file
-        
-    Returns:
-        Document summary
     """
-    try:
-        # TODO: Implement actual document reading and processing
-        # This would involve:
-        # 1. Reading file content based on type (PDF, Word, etc.)
-        # 2. Extracting text
-        # 3. Summarizing with Gemini
-        
-        logger.info(f"Summarizing document: {file_path}")
-        
-        # Mock document summary for now
-        mock_summary = f"""
-        Document analysis for {file_path}:
-        
-        This document contains comprehensive information covering multiple key topics and insights. 
-        The content is well-structured and provides valuable information that could be adapted 
-        for various content formats. Key themes include strategic planning, implementation 
-        guidelines, and best practices that would resonate with professional audiences.
-        """
-        
-        return mock_summary.strip()
-        
-    except Exception as e:
-        logger.error(f"Error summarizing document: {str(e)}")
-        return f"Unable to process document: {file_path}"
+    # TODO: Implement actual document reading and processing
+    logger.info(f"Summarizing document: {file_path}")
+    
+    mock_summary = f"""
+    This document contains comprehensive information. Key themes include strategic planning, 
+    implementation guidelines, and best practices.
+    """
+    
+    return await summarize_transcript(mock_summary)
