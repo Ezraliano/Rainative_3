@@ -46,12 +46,24 @@ async def analyze_content(request: AnalyzeRequest, background_tasks: BackgroundT
             # --- BLOK PENTING UNTUK MENANGANI ERROR TRANSKRIP ---
             try:
                 transcript = await transcriber_service.get_transcript(str(request.youtube_url))
-            except (NoTranscriptFound, TranscriptsDisabled) as e:
-                logger.warning(f"Transcript not available for {request.youtube_url}: {e}")
-                raise HTTPException(
-                    status_code=404,
-                    detail="Sorry, a transcript is not available for this video. Please try another one."
-                )
+            except Exception as e:
+                logger.warning(f"Transcript error for {request.youtube_url}: {e}")
+                # Berikan pesan error yang lebih spesifik berdasarkan jenis error
+                if "subtitles" in str(e).lower() or "captions" in str(e).lower():
+                    raise HTTPException(
+                        status_code=404,
+                        detail="This video doesn't have subtitles available. Please try a video with subtitles enabled, or upload a document instead."
+                    )
+                elif "unavailable" in str(e).lower() or "removed" in str(e).lower():
+                    raise HTTPException(
+                        status_code=404,
+                        detail="This video is not available or has been removed. Please check the URL and try again."
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed to get video transcript: {str(e)}"
+                    )
             # --- AKHIR BLOK PENTING ---
 
             timeline_summary = await _generate_timeline_summary(transcript, video_metadata.duration)
@@ -151,4 +163,4 @@ async def get_analysis_status(task_id: str):
     """
     Get the status of a long-running analysis task.
     """
-    return {"task_id": task_id, "status": "completed", "progress": 100}
+    return {"task_id": task_id, "status": "completed", "progress": 100} 
