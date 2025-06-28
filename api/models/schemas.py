@@ -1,10 +1,10 @@
-from pydantic import BaseModel, HttpUrl, Field
+from pydantic import BaseModel, Field
 from typing import List, Dict, Optional, Union
 from datetime import datetime
 
 class AnalyzeRequest(BaseModel):
     """Request model for content analysis."""
-    youtube_url: Optional[HttpUrl] = Field(None, description="YouTube video URL to analyze")
+    youtube_url: Optional[str] = Field(None, description="YouTube video URL to analyze")
     file_path: Optional[str] = Field(None, description="File path for document analysis")
 
 class VideoMetadata(BaseModel):
