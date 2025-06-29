@@ -1,38 +1,48 @@
-import httpx
-import logging
-from typing import Optional
 import os
 import re
+import logging
 import tempfile
 import subprocess
+from typing import Optional
+
+# Impor library yang relevan
+# --- Perubahan: Impor jenis error spesifik dari OpenAI ---
+from openai import OpenAI, APIConnectionError, RateLimitError, APIStatusError 
+# ----------------------------------------------------
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import NoTranscriptFound, TranscriptsDisabled, VideoUnavailable
+import librosa
+from xml.etree.ElementTree import ParseError
 
 logger = logging.getLogger(__name__)
 
 class TranscriberService:
     """
-    Service for transcribing YouTube videos using youtube-transcript-api.
+    Service for transcribing YouTube videos using youtube-transcript-api
+    with a fallback to OpenAI's Whisper API.
     """
     
     def __init__(self):
-        # Inisialisasi tidak memerlukan apa-apa untuk pustaka ini
+        """
+        Initializes the service by checking for ffmpeg and setting up the OpenAI client.
+        """
         self._ffmpeg_available = self._check_ffmpeg_availability()
+        try:
+            self.openai_client = OpenAI(timeout=20.0) # Menambahkan timeout default
+        except Exception as e:
+            logger.error(f"Failed to initialize OpenAI client: {e}")
+            self.openai_client = None
         
     def _check_ffmpeg_availability(self) -> bool:
-        """
-        Check if ffmpeg is available in the system.
-        """
         try:
-            result = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True)
-            return result.returncode == 0
-        except (FileNotFoundError, subprocess.SubprocessError):
+            subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True, check=True)
+            logger.info("ffmpeg is available.")
+            return True
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            logger.warning("ffmpeg not found. Audio extraction will not be available.")
             return False
         
     def _extract_video_id(self, youtube_url: str) -> Optional[str]:
-        """
-        Extract video ID from a YouTube URL.
-        """
         patterns = [
             r'(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([^&\n?#]+)',
             r'youtube\.com\/watch\?.*v=([^&\n?#]+)',
@@ -41,110 +51,86 @@ class TranscriberService:
             match = re.search(pattern, youtube_url)
             if match:
                 return match.group(1)
+        logger.warning(f"Could not extract video ID from URL: {youtube_url}")
         return None
 
     async def get_transcript(self, youtube_url: str) -> str:
-        """
-        Extract transcript from a YouTube video using its generated captions.
-        Falls back to audio extraction if no subtitles are available.
-        
-        Args:
-            youtube_url: YouTube video URL
-            
-        Returns:
-            Video transcript as a single string.
-        """
         try:
             video_id = self._extract_video_id(youtube_url)
             if not video_id:
-                raise ValueError("Invalid YouTube URL, could not extract video ID.")
+                raise ValueError("Invalid YouTube URL.")
 
-            logger.info(f"Getting transcript for video ID: {video_id}")
+            logger.info(f"Attempting to fetch transcript for video ID: {video_id}")
             
-            # Coba ambil transkrip dari subtitle terlebih dahulu
             try:
                 transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
                 transcript_text = " ".join([item['text'] for item in transcript_list])
-                
                 if transcript_text:
+                    logger.info(f"Successfully fetched transcript from captions for video ID: {video_id}")
                     return transcript_text.strip()
-                    
-            except (NoTranscriptFound, TranscriptsDisabled):
-                logger.info(f"No subtitles available for {video_id}, attempting audio extraction...")
-                # Fallback ke audio extraction jika subtitle tidak tersedia
+            except (NoTranscriptFound, TranscriptsDisabled, ParseError) as e:
+                logger.warning(f"Could not fetch subtitles ({type(e).__name__}). Falling back to audio transcription for video ID: {video_id}.")
                 if not self._ffmpeg_available:
-                    raise Exception("No subtitles available for this video and audio extraction requires ffmpeg (not installed). Please install ffmpeg or try a video with subtitles enabled.")
-                return await self._extract_audio_and_transcribe(youtube_url)
+                    raise Exception("No subtitles available, and ffmpeg is not installed.")
+                if not self.openai_client:
+                    raise Exception("No subtitles available, and OpenAI API is not configured.")
+                return await self._extract_audio_and_transcribe_with_whisper(youtube_url)
             
-            raise ValueError("No transcript available for this video.")
+            raise ValueError("Could not obtain a transcript.")
 
         except VideoUnavailable:
-            logger.error(f"Video is unavailable for video ID: {video_id}")
-            raise Exception("This video is not available or has been removed. Please check the URL and try again.")
-            
+            logger.error(f"Video is unavailable or private: {youtube_url}")
+            raise Exception("This video is not available or has been removed.")
         except Exception as e:
-            logger.error(f"Error getting transcript: {str(e)}")
-            raise Exception(f"Failed to get transcript: {str(e)}")
-    
-    async def _extract_audio_and_transcribe(self, youtube_url: str) -> str:
-        """
-        Extract audio from YouTube video and transcribe it using yt-dlp.
-        This is a fallback method when subtitles are not available.
-        """
+            logger.error(f"An unexpected error occurred for {youtube_url}: {str(e)}", exc_info=True)
+            raise
+
+    async def _extract_audio_and_transcribe_with_whisper(self, youtube_url: str) -> str:
         try:
-            # Buat temporary directory untuk menyimpan audio
             with tempfile.TemporaryDirectory() as temp_dir:
-                audio_file = os.path.join(temp_dir, "audio.mp3")
+                audio_path = os.path.join(temp_dir, "audio.mp3")
+                user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36"
+                cmd = ["yt-dlp", "-x", "--audio-format", "mp3", "--no-playlist", "--user-agent", user_agent, "-o", audio_path, youtube_url]
                 
-                # Extract audio menggunakan yt-dlp dengan opsi yang lebih sederhana
-                cmd = [
-                    "yt-dlp",
-                    "-x",  # Extract audio
-                    "--audio-format", "mp3",
-                    "--audio-quality", "0",  # Best quality
-                    "--no-playlist",  # Skip playlists
-                    "--no-warnings",  # Reduce noise in logs
-                    "-o", audio_file,
-                    youtube_url
-                ]
-                
-                logger.info(f"Extracting audio from {youtube_url}")
+                logger.info(f"Executing yt-dlp to extract audio from: {youtube_url}")
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
                 
                 if result.returncode != 0:
-                    # Cek apakah error disebabkan oleh ffmpeg
-                    if "ffprobe and ffmpeg not found" in result.stderr:
-                        logger.error("ffmpeg not found. Audio extraction requires ffmpeg to be installed.")
-                        raise Exception("Audio extraction requires ffmpeg to be installed. Please install ffmpeg or try a video with subtitles enabled.")
-                    elif "HTTP Error 403" in result.stderr:
-                        logger.error("YouTube blocked access to this video")
-                        raise Exception("YouTube blocked access to this video. Please try a video with subtitles enabled.")
-                    else:
-                        logger.error(f"yt-dlp failed: {result.stderr}")
-                        raise Exception("Failed to extract audio from video. Please try a video with subtitles enabled.")
+                    raise Exception(f"yt-dlp failed to extract audio. Error: {result.stderr}")
+
+                if not os.path.exists(audio_path):
+                    raise FileNotFoundError("Audio file was not created by yt-dlp.")
                 
-                # Cari file audio yang dihasilkan
-                audio_files = [f for f in os.listdir(temp_dir) if f.endswith('.mp3')]
-                if not audio_files:
-                    raise Exception("No audio file was extracted.")
+                logger.info(f"Audio extracted. Transcribing with Whisper API...")
+
+                with open(audio_path, "rb") as audio_file:
+                    transcription = self.openai_client.audio.transcriptions.create(
+                        model="whisper-1", 
+                        file=audio_file,
+                        response_format="json" # Meminta format respons yang konsisten
+                    )
                 
-                audio_path = os.path.join(temp_dir, audio_files[0])
+                transcript_text = transcription.text
+                if not transcript_text:
+                    raise Exception("Whisper API returned an empty transcript.")
                 
-                # TODO: Implement transcription using Whisper API or local model
-                # Untuk sementara, return placeholder
-                logger.warning("Audio extraction successful, but transcription not implemented yet.")
-                raise Exception("Audio extraction successful, but automatic transcription is not yet implemented. Please try a video with subtitles enabled.")
-                
+                logger.info("Whisper API transcription successful.")
+                return transcript_text.strip()
+
+        # --- Blok Penanganan Error API Sesuai Dokumentasi OpenAI ---
+        except RateLimitError as e:
+            logger.error(f"OpenAI API rate limit or quota exceeded: {e}")
+            raise Exception("You have exceeded your OpenAI API quota. Please check your plan and billing details on the OpenAI website.")
+        except APIConnectionError as e:
+            logger.error(f"Failed to connect to OpenAI API: {e}")
+            raise Exception("Could not connect to the OpenAI API. Please check your network connection.")
+        except APIStatusError as e:
+            logger.error(f"OpenAI API returned an error status: {e}")
+            raise Exception(f"OpenAI API returned an error: {e.status_code} - {e.response}")
+        # -------------------------------------------------------------
         except subprocess.TimeoutExpired:
-            raise Exception("Audio extraction timed out. Please try a shorter video or one with subtitles enabled.")
+            logger.error("The audio extraction process with yt-dlp timed out.")
+            raise Exception("Audio extraction timed out. The video might be too long.")
         except Exception as e:
-            logger.error(f"Error in audio extraction: {str(e)}")
-            raise Exception(f"Failed to extract and transcribe audio: {str(e)}")
-    
-    async def _transcribe_with_whisper(self, audio_file_path: str) -> str:
-        """
-        Transcribe audio file using OpenAI Whisper API.
-        
-        TODO: Implement Whisper API integration
-        """
-        pass 
+            logger.error(f"An error occurred during audio extraction or transcription: {str(e)}", exc_info=True)
+            raise
